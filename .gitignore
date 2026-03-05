@@ -1,0 +1,83 @@
+# =========================
+# .NET / Visual Studio
+# =========================
+bin/
+obj/
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa]nyCPU/
+[Ll]og/
+[Ll]ogs/
+*.log
+
+# Visual Studio
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider / JetBrains
+.idea/
+*.sln.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =========================
+# Publish / artifacts
+# =========================
+publish/
+Publish/
+artifacts/
+*.nupkg
+*.snupkg
+
+# =========================
+# Test results / coverage
+# =========================
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+coverage/
+coveragereport/
+
+# =========================
+# Secrets / env
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# App specific (seu projeto)
+# =========================
+# screenshots/html debug
+debug/
+# se você também grava debug em outro lugar
+Debug/
+
+# logs por AWB / runtime logs
+logs/
+log/
+dachser-scraper/logs/
+# se você usar um LOG_DIR fixo tipo C:\logs\firecrawl, não entra aqui (fora do repo)
+
+# =========================
+# Optional: local db / temp
+# =========================
+*.sqlite
+*.db
+*.bak
+*.tmp
+*.temp
+*.swp
+*.swo
