@@ -1,4 +1,5 @@
-﻿#nullable enable
+﻿// Program.cs
+#nullable enable
 using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Threading.Channels;
@@ -23,7 +24,6 @@ static class Program
 
     public static async Task<int> Main(string[] args)
     {
-        // Carrega env uma vez
         Utils.LoadDotEnv(Path.Combine(Environment.CurrentDirectory, ".env"));
         Utils.LoadDotEnv(Path.Combine(AppContext.BaseDirectory, ".env"));
 
@@ -62,7 +62,6 @@ static class Program
         Console.Error.WriteLine($"FIRECRAWL_BASE_URL={FirecrawlBaseUrl} PROXY={FirecrawlProxy} TIMEOUT_MS={FirecrawlTimeoutMs}");
         Console.Error.WriteLine("FIRECRAWL_API_KEY set? " + (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FIRECRAWL_API_KEY"))));
 
-        // Jobs
         List<TrackingJob> jobs;
         if (args.Length > 0)
         {
@@ -100,6 +99,14 @@ static class Program
                 {
                     await Logging.LogAwbAsync(result.Awb, "DB_WRITE_START");
                     await Db.SaveResultToMariaDbAsync(result);
+
+                    Console.WriteLine(result.Awb);
+                    Console.WriteLine(
+                        $"PRE_DB code={result.LastStatusCode} ts={result.Timestamp} origin={result.Origin} dest={result.Destination} " +
+                        $"flight={result.LastFlight} timeline_count={(result.Timeline == null ? -1 : result.Timeline.Count)} " +
+                        $"err={(string.IsNullOrWhiteSpace(result.Error) ? "null" : "yes")}"
+                    );
+
                     await Logging.LogAwbAsync(result.Awb, "DB_WRITE_OK");
                 }
                 catch (Exception ex)
@@ -122,19 +129,59 @@ static class Program
         var tasks = jobs.Select(async job =>
         {
             await sem.WaitAsync();
+
             try
             {
                 await Logging.LogAwbAsync(job.Awb, "JOB_START");
 
                 var sw = Stopwatch.StartNew();
-                await Logging.LogAwbAsync(job.Awb, "FIRECRAWL_START");
 
-                var result = await firecrawl.ScrapeParcelsAsync(job.Awb);
+                await Logging.LogAwbAsync(job.Awb, "FIRECRAWL_FAST_START");
+                var fast = await firecrawl.ScrapeFastAsync(job.Awb);
+                await Logging.LogAwbAsync(job.Awb, "FIRECRAWL_FAST_DONE");
 
-                await Logging.LogAwbAsync(job.Awb, $"FIRECRAWL_DONE ms={sw.ElapsedMilliseconds}");
+                TrackingDetails result;
+
+                bool badFast =
+                    !string.IsNullOrWhiteSpace(fast.Error) ||
+                    fast.LastStatusDescription == "N/A" ||
+                    fast.LastStatusCode == "UNK" ||
+                    (fast.Origin == "N/A" && fast.Destination == "N/A");
+
+                if (badFast)
+                {
+                    await Logging.LogAwbAsync(job.Awb, "FIRECRAWL_FULL_START reason=bad_fast");
+                    result = await firecrawl.ScrapeFullAsync(job.Awb);
+                    await Logging.LogAwbAsync(job.Awb, "FIRECRAWL_FULL_DONE");
+                }
+                else
+                {
+                    var prev = await Db.GetLastSnapshotAsync(job.Awb);
+                    var changed = HasChanged(fast, prev);
+
+                    await Logging.LogAwbAsync(job.Awb, $"COMPARE changed={changed}");
+
+                    if (changed)
+                    {
+                        await Logging.LogAwbAsync(job.Awb, "FIRECRAWL_FULL_START reason=changed");
+                        result = await firecrawl.ScrapeFullAsync(job.Awb);
+                        await Logging.LogAwbAsync(job.Awb, "FIRECRAWL_FULL_DONE");
+                    }
+                    else
+                    {
+                        result = fast;
+                        result.Timeline = null;
+                    }
+                }
 
                 result.Hawbs = job.Hawbs;
                 result.TipoServico = job.TipoServico;
+
+                await Logging.LogAwbAsync(
+                    job.Awb,
+                    $"SCRAPE_RESULT code={result.LastStatusCode} ts={result.Timestamp} origin={result.Origin} dest={result.Destination} " +
+                    $"flight={result.LastFlight} timeline_count={(result.Timeline == null ? -1 : result.Timeline.Count)}"
+                );
 
                 await Logging.LogAwbAsync(job.Awb, "ENQUEUE_TO_DBWRITER");
                 await channel.Writer.WriteAsync(result);
@@ -167,5 +214,20 @@ static class Program
 
         channel.Writer.Complete();
         await dbWriter;
+    }
+
+    private static bool HasChanged(TrackingDetails now, Db.LastSnapshot? prev)
+    {
+        if (prev is null) return true;
+
+        static string N(string? s) => (s ?? "").Trim();
+
+        return
+            !string.Equals(N(now.LastStatusCode), N(prev.LastStatusCode), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(N(now.Timestamp), N(prev.LastStatusTimestamp), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(N(now.LastFlight), N(prev.LastFlight), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(N(now.Origin), N(prev.Origin), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(N(now.Destination), N(prev.Destination), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(N(now.LastStatusDescription), N(prev.LastStatusDescription), StringComparison.OrdinalIgnoreCase);
     }
 }

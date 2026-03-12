@@ -1,6 +1,5 @@
 ﻿// Models.cs
 #nullable enable
-using System.Text.Json.Serialization;
 
 public sealed class TrackingJob
 {
@@ -45,7 +44,7 @@ public sealed class TrackingDetails
     public string LastStatusDescription { get; set; } = "N/A";
     public string Timestamp { get; set; } = "N/A";
 
-    public List<TrackingEvent> Timeline { get; set; } = new();
+    public List<TrackingEvent>? Timeline { get; set; } = new();
 
     public string? Error { get; set; }
 
