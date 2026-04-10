@@ -1,0 +1,72 @@
+# =========================
+# Build
+# =========================
+[Bb]in/
+[Oo]bj/
+publish/
+out/
+
+# =========================
+# User-specific
+# =========================
+*.user
+*.rsuser
+*.suo
+*.userosscache
+*.sln.docstates
+
+# =========================
+# IDEs
+# =========================
+.vs/
+.vscode/
+.idea/
+
+# =========================
+# NuGet
+# =========================
+*.nupkg
+*.snupkg
+packages/
+!packages/build/
+
+# =========================
+# Logs / test
+# =========================
+*.log
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# =========================
+# Local config / secrets
+# =========================
+.env
+.env.*
+appsettings.Development.json
+appsettings.Local.json
+secrets.json
+
+# =========================
+# Database files
+# =========================
+*.mdf
+*.ldf
+*.db
+*.sqlite
+*.sqlite3
+
+# =========================
+# ReSharper / Rider
+# =========================
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+*.sln.iml
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
