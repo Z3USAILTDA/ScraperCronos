@@ -76,7 +76,21 @@ LIMIT 1;
         ["Set"] = "Sep",
         ["Out"] = "Oct",
         ["Nov"] = "Nov",
-        ["Dez"] = "Dec"
+        ["Dez"] = "Dec",
+        // Fallback para Árabe (visto em diagnósticos do ParcelsApp)
+        ["يناير"] = "Jan",
+        ["فبراير"] = "Feb",
+        ["مارس"] = "Mar",
+        ["أبريل"] = "Apr",
+        ["أبر"] = "Apr",
+        ["مايو"] = "May",
+        ["يونيو"] = "Jun",
+        ["يوليو"] = "Jul",
+        ["أغسطس"] = "Aug",
+        ["سبتمبر"] = "Sep",
+        ["أكتوبر"] = "Oct",
+        ["نوفمبر"] = "Nov",
+        ["ديسمبر"] = "Dec"
     };
 
     var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -112,7 +126,21 @@ private static string NormalizeDisplayDate(string input)
         ["Set"] = "Sep",
         ["Out"] = "Oct",
         ["Nov"] = "Nov",
-        ["Dez"] = "Dec"
+        ["Dez"] = "Dec",
+        // Fallback para Árabe
+        ["يناير"] = "Jan",
+        ["فبراير"] = "Feb",
+        ["مارس"] = "Mar",
+        ["أبريل"] = "Apr",
+        ["أبر"] = "Apr",
+        ["مايو"] = "May",
+        ["يونيو"] = "Jun",
+        ["يوليو"] = "Jul",
+        ["أغسطس"] = "Aug",
+        ["سبتمبر"] = "Sep",
+        ["أكتوبر"] = "Oct",
+        ["نوفمبر"] = "Nov",
+        ["ديسمبر"] = "Dec"
     };
 
     var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -491,6 +519,69 @@ ORDER by tda.awb_number, tda.hawb_number;
 ";
 
         await using var cmd = new MySqlCommand(sql, conn);
+        var map = new Dictionary<string, TrackingJob>(StringComparer.OrdinalIgnoreCase);
+
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var rawAwb = reader.IsDBNull(0) ? "" : reader.GetString(0);
+            var awb = Utils.NormalizeAwb(rawAwb);
+            if (awb is null) continue;
+
+            if (!map.TryGetValue(awb, out var job))
+            {
+                job = new TrackingJob
+                {
+                    Awb = awb
+                };
+                map[awb] = job;
+            }
+
+            if (!reader.IsDBNull(1))
+            {
+                var hawb = reader.GetString(1).Trim();
+                if (!string.IsNullOrWhiteSpace(hawb) && !job.Hawbs.Contains(hawb))
+                    job.Hawbs.Add(hawb);
+            }
+        }
+
+        return map.Values.ToList();
+    }
+
+    /// <summary>
+    /// Carrega apenas AWBs que foram adicionados nos últimos <paramref name="lookbackMinutes"/> minutos.
+    /// Usado pelo loop rápido para processar AWBs recém-inseridos com alta frequência.
+    /// </summary>
+    public static async Task<List<TrackingJob>> LoadRecentJobsFromMariaDbAsync(int lookbackMinutes)
+    {
+        var cs = BuildMariaDbConnString();
+        await using var conn = new MySqlConnection(cs);
+        await conn.OpenAsync();
+
+        var sql = @"
+SELECT DISTINCT
+    tda.awb_number,
+    tda.hawb_number,
+    taf.awb,
+    taf.destination
+FROM cronos.t_aereo tda
+LEFT JOIN cronos.t_aereo_ws taf
+    ON taf.awb = tda.awb_number
+WHERE tda.awb_number IS NOT NULL
+  AND TRIM(tda.awb_number) <> ''
+  AND (
+        taf.awb IS NULL
+        OR taf.last_status_code IS NULL
+        OR taf.last_status_code NOT IN ('DLV', 'POD')
+        OR (taf.origin IS NULL AND taf.destination IS NULL)
+      )
+  AND tda.created_at >= NOW() - INTERVAL @minutes MINUTE
+ORDER by tda.awb_number, tda.hawb_number;
+";
+
+        await using var cmd = new MySqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@minutes", lookbackMinutes);
+
         var map = new Dictionary<string, TrackingJob>(StringComparer.OrdinalIgnoreCase);
 
         await using var reader = await cmd.ExecuteReaderAsync();

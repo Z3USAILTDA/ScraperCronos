@@ -50,6 +50,15 @@ static class Program
     private static bool ScrapeDoShowFrames =>
         (Environment.GetEnvironmentVariable("SCRAPEDO_SHOW_FRAMES") ?? "true").Trim().Equals("true", StringComparison.OrdinalIgnoreCase);
 
+    // ── Fast-loop config ──────────────────────────────────────────────
+    private static readonly int FastLoopDelaySeconds =
+        int.TryParse(Environment.GetEnvironmentVariable("FAST_LOOP_DELAY_SECONDS"), out var fl) ? fl : 120;
+
+    private static readonly int FastLoopLookbackSeconds =
+        int.TryParse(Environment.GetEnvironmentVariable("FAST_LOOP_LOOKBACK_SECONDS"), out var lb) ? lb : 1800;
+
+    private static readonly int FastLoopLookbackMinutes = FastLoopLookbackSeconds / 60;
+
     public static async Task<int> Main(string[] args)
     {
         Utils.LoadDotEnv(Path.Combine(Environment.CurrentDirectory, ".env"));
@@ -57,57 +66,112 @@ static class Program
 
         Directory.CreateDirectory(Logging.LogsDir);
 
-        var delaySeconds = int.TryParse(Environment.GetEnvironmentVariable("LOOP_DELAY_SECONDS"), out var d) ? d : 30;
+        var mainDelaySeconds = int.TryParse(Environment.GetEnvironmentVariable("LOOP_DELAY_SECONDS"), out var d) ? d : 30;
 
+        // Se argumentos foram passados, executa uma vez e sai
+        if (args.Length > 0)
+        {
+            await RunOnceAsync(args);
+            return 0;
+        }
+
+        Console.Error.WriteLine($"[CONFIG] Loop Principal: {mainDelaySeconds}s | Loop Rápido: {FastLoopDelaySeconds}s (Lookback: {FastLoopLookbackMinutes}min)");
+
+        // Executa os dois loops em paralelo
+        var mainLoop = RunMainLoopAsync(mainDelaySeconds);
+        var fastLoop = RunFastLoopAsync();
+
+        await Task.WhenAll(mainLoop, fastLoop);
+
+        return 0; // nunca alcançado
+    }
+
+    // ── Loop Principal (intervalo longo – todos os AWBs elegíveis) ────
+    private static async Task RunMainLoopAsync(int delaySeconds)
+    {
         while (true)
         {
             var cycleId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
-            Console.Error.WriteLine($"===== CYCLE_START {cycleId} =====");
+            Console.Error.WriteLine($"===== MAIN_CYCLE_START {cycleId} =====");
 
             try
             {
-                await RunOnceAsync(args);
-                Console.Error.WriteLine($"===== CYCLE_OK {cycleId} =====");
+                var jobs = await Db.LoadJobsFromMariaDbAsync();
+                if (jobs.Count > 0)
+                    Console.WriteLine($"[MAIN] Rastreando {jobs.Count} AWBs...");
+
+                await ProcessJobsAsync(jobs, "MAIN");
+
+                Console.Error.WriteLine($"===== MAIN_CYCLE_OK {cycleId} =====");
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"===== CYCLE_FAIL {cycleId}: {ex} =====");
+                Console.Error.WriteLine($"===== MAIN_CYCLE_FAIL {cycleId}: {ex} =====");
             }
 
-            Console.Error.WriteLine($"===== CYCLE_SLEEP {delaySeconds}s =====");
+            Console.Error.WriteLine($"===== MAIN_CYCLE_SLEEP {delaySeconds}s =====");
             await Task.Delay(TimeSpan.FromSeconds(delaySeconds));
+        }
+    }
+
+    // ── Loop Rápido (intervalo curto – somente AWBs recentes) ─────────
+    private static async Task RunFastLoopAsync()
+    {
+        while (true)
+        {
+            var cycleId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+            Console.Error.WriteLine($"===== FAST_CYCLE_START {cycleId} =====");
+
+            try
+            {
+                var jobs = await Db.LoadRecentJobsFromMariaDbAsync(FastLoopLookbackMinutes);
+                if (jobs.Count > 0)
+                    Console.WriteLine($"[FAST] Rastreando {jobs.Count} AWBs recentes (últimos {FastLoopLookbackMinutes}min)...");
+
+                await ProcessJobsAsync(jobs, "FAST");
+
+                Console.Error.WriteLine($"===== FAST_CYCLE_OK {cycleId} =====");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"===== FAST_CYCLE_FAIL {cycleId}: {ex} =====");
+            }
+
+            Console.Error.WriteLine($"===== FAST_CYCLE_SLEEP {FastLoopDelaySeconds}s =====");
+            await Task.Delay(TimeSpan.FromSeconds(FastLoopDelaySeconds));
         }
     }
 
     
 
+    /// <summary>
+    /// Execução avulsa via CLI (argumentos manuais).
+    /// </summary>
     private static async Task RunOnceAsync(string[] args)
     {
-        // Startup Logs Simplificados
         Console.WriteLine($"[INFO] Provedor Atual: {ScraperProvider.ToUpper()}");
 
-        List<TrackingJob> jobs;
-        if (args.Length > 0)
-        {
-            jobs = args.Select(Utils.NormalizeAwb)
+        var jobs = args.Select(Utils.NormalizeAwb)
                        .Where(x => x is not null)
                        .Cast<string>()
                        .Distinct(StringComparer.OrdinalIgnoreCase)
                        .Select(a => new TrackingJob { Awb = a })
                        .ToList();
-        }
-        else
-        {
-            jobs = await Db.LoadJobsFromMariaDbAsync();
-            if (jobs.Count > 0)
-            {
-                Console.WriteLine($"[INFO] Rastreiando {jobs.Count} AWBs no MariaDB...\n");
-            }
-        }
+
+        await ProcessJobsAsync(jobs, "CLI");
+    }
+
+    /// <summary>
+    /// Pipeline compartilhado: recebe a lista de jobs já filtrada e executa scraping + persistência.
+    /// O parâmetro <paramref name="tag"/> é usado nos logs para distinguir MAIN / FAST / CLI.
+    /// </summary>
+    private static async Task ProcessJobsAsync(List<TrackingJob> jobs, string tag)
+    {
+        Console.WriteLine($"[INFO] [{tag}] Provedor Atual: {ScraperProvider.ToUpper()}");
 
         if (jobs.Count == 0)
         {
-            Console.Error.WriteLine("Nenhum AWB válido para processar.");
+            Console.Error.WriteLine($"[{tag}] Nenhum AWB válido para processar.");
             return;
         }
 
@@ -128,18 +192,18 @@ static class Program
 
                     if (string.IsNullOrWhiteSpace(result.Error))
                     {
-                        Console.WriteLine($"[AWB {result.Awb}] \u2705 SUCESSO | Origem: {result.Origin} -> Destino: {result.Destination} | Voo: {result.LastFlight} ({result.LastStatusCode}) | Timeline: {(result.Timeline?.Count ?? 0)} eventos.");
+                        Console.WriteLine($"[{tag}][AWB {result.Awb}] \u2705 SUCESSO | Origem: {result.Origin} -> Destino: {result.Destination} | Voo: {result.LastFlight} ({result.LastStatusCode}) | Timeline: {(result.Timeline?.Count ?? 0)} eventos.");
                     }
                     else
                     {
-                        Console.WriteLine($"[AWB {result.Awb}] \u26A0\uFE0F FALHA GERAL | Erro: {result.Error}");
+                        Console.WriteLine($"[{tag}][AWB {result.Awb}] \u26A0\uFE0F FALHA GERAL | Erro: {result.Error}");
                     }
 
                     await Logging.LogAwbAsync(result.Awb, "DB_WRITE_OK");
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[DB] erro ao salvar {result.Awb}: {ex}");
+                    Console.Error.WriteLine($"[{tag}][DB] erro ao salvar {result.Awb}: {ex}");
                     await Logging.LogAwbAsync(result.Awb, "DB_WRITE_FAIL", ex);
                 }
             }
@@ -159,7 +223,7 @@ static class Program
                     (job.Hawbs != null && job.Hawbs.Any(h => string.Equals(job.Awb, h, StringComparison.OrdinalIgnoreCase))))
                 {
                     await Logging.LogAwbAsync(job.Awb, "JOB_INVALID_AWB");
-                    Console.WriteLine($"[AWB {job.Awb}] \uD83D\uDEAB AWB inválido (NI ou igual ao HAWB). Ignorando scrape.");
+                    Console.WriteLine($"[{tag}][AWB {job.Awb}] \uD83D\uDEAB AWB inválido (NI ou igual ao HAWB). Ignorando scrape.");
                     
                     var invalidResult = TrackingDetails.Empty(job.Awb, "AWB inválido");
                     invalidResult.Hawbs = job.Hawbs ?? new List<string>();
@@ -167,7 +231,7 @@ static class Program
                     invalidResult.Source = "N/A";
 
                     await channel.Writer.WriteAsync(invalidResult);
-                    return; // Ignora o fluxo abaixo e move pro próximo AWB.
+                    return;
                 }
 
                 var sw = Stopwatch.StartNew();
@@ -180,7 +244,7 @@ static class Program
                 );
                 await Logging.LogAwbAsync(job.Awb, $"SCRAPER_DONE ms={sw.ElapsedMilliseconds}");
 
-                result.Hawbs = job.Hawbs;
+                result.Hawbs = job.Hawbs ?? new List<string>();
                 result.TipoServico = job.TipoServico;
 
                 await Logging.LogAwbAsync(
@@ -195,7 +259,7 @@ static class Program
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[{job.Awb}] erro: {ex}");
+                Console.Error.WriteLine($"[{tag}][{job.Awb}] erro: {ex}");
                 await Logging.LogAwbAsync(job.Awb, "JOB_EXCEPTION", ex);
 
                 var fail = TrackingDetails.Empty(job.Awb, $"Erro no job: {ex.Message}");

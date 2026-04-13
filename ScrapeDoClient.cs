@@ -11,6 +11,11 @@ public sealed class ScrapeDoClient : IScraperClient
     private readonly string _token;
     private readonly int _timeoutMs;
     private readonly string _superMode;
+    private readonly bool _render;
+    private readonly string _waitUntil;
+    private readonly int _customWaitMs;
+    private readonly bool _returnJson;
+    private readonly bool _showFrames;
 
     public ScrapeDoClient(
         HttpClient http,
@@ -25,19 +30,36 @@ public sealed class ScrapeDoClient : IScraperClient
     {
         _http = http;
         _token = token;
-        _timeoutMs = timeoutMs;
         _superMode = superMode;
+        _timeoutMs = timeoutMs;
+        _render = render;
+        _waitUntil = string.IsNullOrWhiteSpace(waitUntil) ? "networkidle2" : waitUntil;
+        _customWaitMs = customWaitMs;
+        _returnJson = returnJson;
+        _showFrames = showFrames;
     }
 
     public async Task<TrackingDetails> ScrapeAsync(string awb)
     {
-        var targetUrl = $"https://parcelsapp.com/pt/tracking/{Uri.EscapeDataString(awb)}";
+        // Adicionamos um Cache Buster agressivo com chave aleatória para evitar detecção de padrão
+        var cbKey = "_" + Random.Shared.Next(1000, 9999);
+        var cbVal = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var targetUrl = $"https://parcelsapp.com/pt/tracking/{Uri.EscapeDataString(awb)}?{cbKey}={cbVal}";
         var encodedTargetUrl = WebUtility.UrlEncode(targetUrl);
 
+        // ParcelsApp mostra dados cacheados no render inicial.
+        // Para forçar dados frescos, precisamos:
+        // 1) Esperar o render inicial
+        // 2) Clicar no botão "Tente novamente" (se existir) para forçar re-fetch da companhia aérea
+        // 3) Esperar os dados frescos carregarem via AJAX
+        var waitMs = _customWaitMs > 0 ? _customWaitMs : 10000;
         var browserActions = new object[]
         {
-            // Apenas aguardamos o carregamento da página sem forçar o navegador a executar clicks pesados
-            new { Action = "Wait", Timeout = 7000 }
+            new { Action = "Wait", Timeout = 8000 },                                          // Espera render inicial + AJAX
+            new { Action = "Click", Selector = "a.btn.btn-default[href*='retry']" },           // Clica "Tente novamente" (link com retry)
+            new { Action = "Wait", Timeout = 3000 },                                           // Pausa curta
+            new { Action = "Click", Selector = "button.btn.btn-default" },                     // Fallback: clica botão genérico "Tente novamente"
+            new { Action = "Wait", Timeout = waitMs },                                         // Espera dados frescos carregarem
         };
 
         var browserActionsJson = JsonSerializer.Serialize(browserActions);
@@ -47,9 +69,10 @@ public sealed class ScrapeDoClient : IScraperClient
             $"https://api.scrape.do/?" +
             $"token={Uri.EscapeDataString(_token)}" +
             $"&url={encodedTargetUrl}" +
-            $"&render=true" +
-            $"&waitUntil=load" +
+            $"&render={(_render ? "true" : "false")}" +
+            $"&waitUntil={Uri.EscapeDataString(_waitUntil)}" +
             $"&output=markdown" +
+            $"&customHeaders=true" +
             (_superMode.Equals("true", StringComparison.OrdinalIgnoreCase) ? "&super=true" : "") +
             $"&playWithBrowser={encodedBrowserActions}";
 
@@ -60,6 +83,10 @@ public sealed class ScrapeDoClient : IScraperClient
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(_timeoutMs));
             using var req = new HttpRequestMessage(HttpMethod.Get, requestUrl);
+            req.Headers.TryAddWithoutValidation("Accept-Language", "pt-BR,pt;q=0.9,en-US,en;q=0.8");
+            req.Headers.TryAddWithoutValidation("Cache-Control", "no-cache");
+            req.Headers.TryAddWithoutValidation("Pragma", "no-cache");
+            req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36");
 
             resp = await _http.SendAsync(req, cts.Token);
             body = await resp.Content.ReadAsStringAsync(cts.Token);
@@ -351,7 +378,7 @@ public sealed class ScrapeDoClient : IScraperClient
             .ToList();
 
         var dateRegex = new Regex(
-            @"(?<date>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})(?:\s+(?<time>\d{1,2}:\d{2}))?",
+            @"(?<date>\d{1,2}\s+\S{3,}\s+\d{4})(?:\s+(?<time>\d{1,2}:\d{2}))?",
             RegexOptions.Compiled);
 
         for (int i = 0; i < lines.Count; i++)
