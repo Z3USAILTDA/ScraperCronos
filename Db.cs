@@ -508,6 +508,7 @@ LEFT JOIN cronos.t_aereo_ws taf
     ON taf.awb = tda.awb_number
 WHERE tda.awb_number IS NOT NULL
   AND TRIM(tda.awb_number) <> ''
+  AND LEFT(tda.awb_number, 3) NOT IN ('001', '083', '016', '996', '139')
   AND (
         taf.awb IS NULL
         OR taf.last_status_code IS NULL
@@ -515,7 +516,7 @@ WHERE tda.awb_number IS NOT NULL
         OR (taf.origin IS NULL AND taf.destination IS NULL)
       )
   AND tda.created_at >= '2026-03-01'
-ORDER by tda.awb_number, tda.hawb_number;
+ORDER BY tda.awb_number, tda.hawb_number;
 ";
 
         await using var cmd = new MySqlCommand(sql, conn);
